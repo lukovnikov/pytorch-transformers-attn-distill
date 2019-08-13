@@ -233,6 +233,10 @@ except (ImportError, AttributeError) as e:
             self.bias = nn.Parameter(torch.zeros(hidden_size))
             self.variance_epsilon = eps
 
+        def reset_parameters(self):
+            self.weight.data.fill_(1)
+            self.bias.data.fill_(1)
+
         def forward(self, x):
             u = x.mean(-1, keepdim=True)
             s = (x - u).pow(2).mean(-1, keepdim=True)
