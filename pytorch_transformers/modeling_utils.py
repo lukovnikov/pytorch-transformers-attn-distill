@@ -87,6 +87,7 @@ class PretrainedConfig(object):
         self.finetuning_task = kwargs.pop('finetuning_task', None)
         self.num_labels = kwargs.pop('num_labels', 2)
         self.output_attentions = kwargs.pop('output_attentions', False)
+        self.output_attentions_logits = kwargs.pop('output_attentions_logits', False)
         self.output_hidden_states = kwargs.pop('output_hidden_states', False)
         self.torchscript = kwargs.pop('torchscript', False)
 
