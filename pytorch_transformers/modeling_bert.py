@@ -256,8 +256,16 @@ class BertEmbeddings(nn.Module):
         # any TensorFlow checkpoint file
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self._no_grad = False
 
     def forward(self, input_ids, token_type_ids=None, position_ids=None):
+        if self._no_grad:
+            with torch.no_grad():
+                return self._forward(input_ids, token_type_ids=token_type_ids, position_ids=position_ids)
+        else:
+            return self._forward(input_ids, token_type_ids=token_type_ids, position_ids=position_ids)
+
+    def _forward(self, input_ids, token_type_ids=None, position_ids=None):
         seq_length = input_ids.size(1)
         if position_ids is None:
             position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
@@ -416,8 +424,16 @@ class BertLayer(nn.Module):
         self.attention = BertAttention(config)
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
+        self._no_grad = False
 
     def forward(self, hidden_states, attention_mask, head_mask=None):
+        if self._no_grad:
+            with torch.no_grad():
+                return self._forward(hidden_states=hidden_states, attention_mask=attention_mask, head_mask=head_mask)
+        else:
+            return self._forward(hidden_states=hidden_states, attention_mask=attention_mask, head_mask=head_mask)
+
+    def _forward(self, hidden_states, attention_mask, head_mask=None):
         attention_outputs = self.attention(hidden_states, attention_mask, head_mask)
         attention_output = attention_outputs[0]
         intermediate_output = self.intermediate(attention_output)
