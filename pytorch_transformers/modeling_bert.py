@@ -232,16 +232,30 @@ except (ImportError, AttributeError) as e:
             self.weight = nn.Parameter(torch.ones(hidden_size))
             self.bias = nn.Parameter(torch.zeros(hidden_size))
             self.variance_epsilon = eps
+            self.register_buffer("_np_mask", None)        # (dim,) float of zeros and ones
+
+        def set_np_mask(self, mask):
+            self._np_mask = mask
 
         def reset_parameters(self):
             self.weight.data.fill_(1)
             self.bias.data.fill_(1)
 
         def forward(self, x):
-            u = x.mean(-1, keepdim=True)
-            s = (x - u).pow(2).mean(-1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.variance_epsilon)
-            return self.weight * x + self.bias
+            if self._np_mask is None:
+                u = x.mean(-1, keepdim=True)
+                s = (x - u).pow(2).mean(-1, keepdim=True)
+                x = (x - u) / torch.sqrt(s + self.variance_epsilon)
+                ret = self.weight * x + self.bias
+                return ret
+            else:
+                mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+                x = x * mask.float()
+                u = x.sum(-1, keepdim=True) / mask.sum()
+                s = ((x - u) * mask).pow(2).sum(-1, keepdim=True) / mask.sum()
+                x = ((x - u) * mask) / torch.sqrt(s + self.variance_epsilon)
+                ret = self.weight * x + self.bias
+                return ret * mask
 
 class BertEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings.
@@ -257,6 +271,11 @@ class BertEmbeddings(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self._no_grad = False
+        self.register_buffer("_np_mask", None)
+
+    def set_np_mask(self, mask):
+        self._np_mask = mask
+        self.LayerNorm.set_np_mask(mask)
 
     def forward(self, input_ids, token_type_ids=None, position_ids=None):
         if self._no_grad:
@@ -278,6 +297,11 @@ class BertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
+
+        if self._np_mask is not None:
+            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            embeddings = embeddings * mask
+
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -302,6 +326,12 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.register_buffer("_np_att_mask", None)
+        self.register_buffer("_np_val_mask", None)
+
+    def set_np_mask(self, attmask, valmask):
+        self._np_att_mask = attmask    # must be (numheads, dim_per_head)
+        self._np_val_mask = valmask    # must be (numheads, dim_per_head)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -316,10 +346,16 @@ class BertSelfAttention(nn.Module):
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
+        attention_head_size = self.attention_head_size
+        if self._np_att_mask is not None:
+            mask = self._np_att_mask.unsqueeze(1).unsqueeze(0)
+            query_layer = query_layer * mask
+            key_layer = key_layer * mask
+            attention_head_size = mask[0, 0, 0].sum()
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        attention_scores = attention_scores / math.sqrt(attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
 
@@ -335,6 +371,9 @@ class BertSelfAttention(nn.Module):
             attention_probs = attention_probs * head_mask
 
         context_layer = torch.matmul(attention_probs, value_layer)
+        if self._np_val_mask is not None:
+            mask = self._np_val_mask.unsqueeze(1).unsqueeze(0)
+            context_layer = context_layer * mask
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -351,9 +390,17 @@ class BertSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.register_buffer("_np_mask", None)
+
+    def set_np_mask(self, mask):
+        self._np_mask = mask
+        self.LayerNorm.set_np_mask(mask)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
+        if self._np_mask is not None:
+            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            hidden_states = hidden_states * mask
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -397,10 +444,17 @@ class BertIntermediate(nn.Module):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
+        self.register_buffer("_np_mask", None)
+
+    def set_np_mask(self, mask):
+        self._np_mask = mask
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.intermediate_act_fn(hidden_states)
+        if self._np_mask is not None:
+            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            hidden_states = hidden_states * mask
         return hidden_states
 
 
@@ -410,9 +464,17 @@ class BertOutput(nn.Module):
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.register_buffer("_np_mask", None)
+
+    def set_np_mask(self, mask):
+        self._np_mask = mask
+        self.LayerNorm.set_np_mask(mask)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
+        if self._np_mask is not None:
+            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            hidden_states = hidden_states * mask
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -479,6 +541,10 @@ class BertPooler(nn.Module):
         super(BertPooler, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
+        self.register_buffer("_np_mask", None)
+
+    def set_np_mask(self, mask):
+        self._np_mask = mask
 
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
@@ -486,6 +552,9 @@ class BertPooler(nn.Module):
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
+        if self._np_mask is not None:
+            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            pooled_output = pooled_output * mask
         return pooled_output
 
 
