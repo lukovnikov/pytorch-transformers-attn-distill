@@ -553,7 +553,7 @@ class BertPooler(nn.Module):
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         if self._np_mask is not None:
-            mask = self._np_mask.unsqueeze(0).unsqueeze(0)
+            mask = self._np_mask.unsqueeze(0)
             pooled_output = pooled_output * mask
         return pooled_output
 
