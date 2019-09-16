@@ -239,7 +239,7 @@ except (ImportError, AttributeError) as e:
 
         def reset_parameters(self):
             self.weight.data.fill_(1)
-            self.bias.data.fill_(1)
+            self.bias.data.fill_(0)
 
         def forward(self, x):
             if self._np_mask is None:
